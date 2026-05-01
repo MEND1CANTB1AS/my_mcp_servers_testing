@@ -1,2 +1,2 @@
 # Secrets
-mcp_server/.streamlit/secrets.toml
+mcp_server/.streamlit/*.toml
