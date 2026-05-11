@@ -1,15 +1,17 @@
-"""Web Crawler MCP Tool with Retrieval-Augmented Generation (RAG).
+"""
+Web Crawler MCP Tool with Retrieval-Augmented Generation (RAG).
 
-This tool fetches web pages, extracts relevant content, and uses keyword-based
-retrieval to answer questions about web content.
+This tool uses crawl4ai for headless browser-based web crawling,
+extracts relevant content, and uses keyword-based retrieval to answer
+questions about web content.
 """
 import json
 import re
 from typing import Optional
 from urllib.parse import urljoin, urlparse
 
-import requests
-from bs4 import BeautifulSoup
+from crawl4ai import AsyncWebCrawler
+from crawl4ai.markdown_handler import MarkdownGenerator
 
 
 class SimpleVectorStore:
@@ -112,52 +114,46 @@ class SimpleVectorStore:
 
 
 class WebCrawlerTool:
-    """MCP Tool for web crawling with RAG capabilities."""
+    """MCP Tool for web crawling with RAG capabilities using crawl4ai."""
 
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            )
-        })
+        self.crawler = None
         self.vector_store = SimpleVectorStore()
         self.max_depth = 2  # Maximum number of pages to crawl from each link
         self.max_links = 100  # Maximum number of links to follow
         self.timeout = 10  # Request timeout in seconds
 
-    def fetch_url(self, url: str) -> Optional[str]:
-        """Fetch and parse a URL, extracting relevant content."""
+    async def init_crawler(self):
+        """Initialize crawl4ai crawler if not already initialized."""
+        if self.crawler is None:
+            self.crawler = AsyncWebCrawler(verbose=False, headless=True)
+            await self.crawler.start()
+
+    async def fetch_url(self, url: str) -> Optional[str]:
+        """Fetch and parse a URL using crawl4ai."""
         try:
-            # Use requests directly to avoid session caching issues
-            response = requests.get(url, headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.5",
-                "Accept-Encoding": "gzip, deflate, br",
-                "Connection": "keep-alive"
-            }, timeout=self.timeout)
-            response.raise_for_status()
+            await self.init_crawler()
 
-            soup = BeautifulSoup(response.text, 'lxml')
+            # Fetch the page using crawl4ai
+            result = await self.crawler.arun(url)
 
-            # Remove script, style, and hidden elements (keep nav/content structure)
-            for element in soup(['script', 'style', 'noscript', 'iframe']):
-                element.decompose()
+            if not result.success:
+                return None
 
-            # Remove anchors with no content
-            for a in soup.find_all('a', href=lambda h: h == '#' or h == 'javascript:'):
-                a.decompose()
+            # Generate markdown from the crawled content
+            md_generator = MarkdownGenerator()
+            markdown = md_generator.generate_markdown(result)
+
+            # Remove script, style, and hidden elements from markdown
+            import re
+            markdown = re.sub(r'<script[^>]*>.*?</script>', '', markdown, flags=re.DOTALL)
+            markdown = re.sub(r'<style[^>]*>.*?</style>', '', markdown, flags=re.DOTALL)
+            markdown = re.sub(r'<noscript[^>]*>.*?</noscript>', '', markdown, flags=re.DOTALL)
+            markdown = re.sub(r'<iframe[^>]*>.*?</iframe>', '', markdown, flags=re.DOTALL)
 
             # Extract text with reasonable length
-            text = soup.get_text(separator='\n')  # noqa: F841
-            text = re.sub(r'\s+', ' ', text).strip()
+            text = markdown.strip()
+            text = re.sub(r'\s+', ' ', text)
 
             # Limit text length
             if len(text) > 50000:
@@ -165,11 +161,45 @@ class WebCrawlerTool:
 
             return text
 
-        except requests.exceptions.RequestException as e:
+        except Exception as e:
             print(f"Error fetching {url}: {e}")
             return None
 
-    def chunk_content(self, text: str, chunk_size: int = 1000, overlap: int = 200) -> list:
+    async def extract_links(self, result) -> list:
+        """Extract links from a crawled page using crawl4ai result."""
+        links = []
+
+        if not result or not result.html:
+            return links
+
+        # Extract links from the HTML content
+        link_pattern = r'<a\s+[^>]*href=["\']([^"\']+)["\'][^>]*>([^<]+)</a>'
+        matches = re.findall(link_pattern, result.html, re.IGNORECASE)
+
+        for href, link_text in matches:
+            # Skip anchors and javascript links
+            if '#' in href or href.lower().startswith(('javascript:', 'mailto:', 'tel:')):
+                continue
+
+            # Build full URL
+            if href.startswith('//'):
+                full_url = 'https:' + href
+            elif href.startswith('/'):
+                domain = urlparse(result.url).netloc
+                path = result.url.split('/', 3)[3] if len(result.url.split('/')) > 3 else ''
+                full_url = f"https://{domain}/{path}/{href}" if path else f"https://{domain}{href}"
+            elif href.startswith('http'):
+                full_url = href
+            else:
+                base_path = result.url.rsplit('/', 1)[0]
+                full_url = f"{base_path}/{href}"
+
+            if full_url not in links:
+                links.append(full_url)
+
+        return links
+
+    async def chunk_content(self, text: str, chunk_size: int = 1000, overlap: int = 200) -> list:
         """Split text into overlapping chunks."""
         chunks = []
         text = text.strip()
@@ -191,19 +221,21 @@ class WebCrawlerTool:
 
         return chunks
 
-    def crawl(self, url: str, max_links: Optional[int] = None, max_depth: Optional[int] = None) -> dict:
-        """Crawl a URL and its linked pages."""
+    async def crawl(self, url: str, max_links: Optional[int] = None, max_depth: Optional[int] = None) -> dict:
+        """Crawl a URL and its linked pages using crawl4ai."""
         max_links = max_links or self.max_links
         max_depth = max_depth or self.max_depth
 
         # Extract domain for filtering (must be before nested function uses it)
         base_domain = urlparse(url).netloc
 
+        await self.init_crawler()
+
         visited = set()
         all_chunks = []
         crawled_urls = []
 
-        def crawl_page(page_url: str, depth: int = 0):
+        async def crawl_page(page_url: str, depth: int = 0):
             if depth > max_depth or len(visited) >= max_links:
                 return
 
@@ -212,17 +244,23 @@ class WebCrawlerTool:
                 return
             visited.add(page_url)
 
-            # Fetch and parse page
-            text = self.fetch_url(page_url)
+            # Fetch and parse page using crawl4ai
+            text = await self.fetch_url(page_url)
             if not text:
                 return
 
-            # Parse HTML for title extraction and link following
-            soup = BeautifulSoup(text, 'lxml')
+            # Extract title from the result
+            result = await self.crawler.arun(page_url)
+            title = result.title if result.success else None
 
+            # Parse HTML for link following
+            html = result.html if result.success else ""
+            soup_links = self._extract_links_from_html(html)
+
+            # Add to crawled URLs list
             crawled_urls.append({
                 "url": page_url,
-                "title": self._extract_title(soup),
+                "title": title,
                 "domain": self._extract_domain(page_url)
             })
 
@@ -234,34 +272,21 @@ class WebCrawlerTool:
             all_chunks.extend(chunks)
 
             # Follow links
-            links = soup.find_all('a', href=True)
-
-            for link in links:
-                href = link.get('href')
-                if not href:
-                    continue
-
-                # Skip anchors and javascript links
-                if '#' in href or href.lower().startswith(('javascript:', 'mailto:', 'tel:')):
-                    continue
-
-                absolute_url = urljoin(page_url, href)
-
-                # Skip already visited
-                if absolute_url in visited:
+            for link in soup_links:
+                if link in visited:
                     continue
 
                 # Domain filter - allow same domain and subdomains
-                link_domain = urlparse(absolute_url).netloc
+                link_domain = urlparse(link).netloc
                 # Allow same domain or subdomain (e.g., docs.python.org from python.org)
                 is_same_domain = (
                     link_domain == base_domain or
                     link_domain.endswith('.' + base_domain)
                 )
                 if link_domain and is_same_domain:
-                    crawl_page(absolute_url, depth + 1)
+                    await crawl_page(link, depth + 1)
 
-        crawl_page(url)
+        await crawl_page(url)
 
         return {
             "initial_url": url,
@@ -270,16 +295,59 @@ class WebCrawlerTool:
             "indexed_chunks": len(all_chunks)
         }
 
-    def _extract_title(self, soup: BeautifulSoup) -> Optional[str]:
-        """Extract page title from soup."""
-        title_tag = soup.find('title')
-        if title_tag:
-            return title_tag.get_text(strip=True)
+    def _extract_links_from_html(self, html: str) -> list:
+        """Extract links from HTML content."""
+        links = []
+
+        if not html:
+            return links
+
+        # Extract links from the HTML content
+        import re
+        link_pattern = r'<a\s+[^>]*href=["\']([^"\']+)["\'][^>]*>([^<]+)</a>'
+        matches = re.findall(link_pattern, html, re.IGNORECASE)
+
+        for href, _ in matches:
+            # Skip anchors and javascript links
+            if '#' in href or href.lower().startswith(('javascript:', 'mailto:', 'tel:')):
+                continue
+
+            # Build full URL
+            if href.startswith('//'):
+                full_url = 'https:' + href
+            elif href.startswith('/'):
+                domain = urlparse(html.split('src')[0] if 'src' in html else 'about:blank').netloc
+                if not domain:
+                    domain = html.split('/')[0].split(':')[0]
+                    full_url = f"https://{domain}{href}"
+                else:
+                    path = html.split('/', 3)[3] if len(html.split('/')) > 3 else ''
+                    full_url = f"https://{domain}/{path}/{href}" if path else f"https://{domain}{href}"
+            elif href.startswith('http'):
+                full_url = href
+            else:
+                base_path = html.rsplit('/', 1)[0]
+                full_url = f"{base_path}/{href}"
+
+            if full_url not in links:
+                links.append(full_url)
+
+        return links
+
+    def _extract_title(self, html: str) -> Optional[str]:
+        """Extract page title from HTML."""
+        if not html:
+            return None
+
+        # Try to find title tag
+        title_match = re.search(r'<title[^>]*>(.*?)</title>', html, re.IGNORECASE)
+        if title_match:
+            return title_match.group(1).strip()
 
         # Try h1
-        h1 = soup.find('h1')
-        if h1:
-            return h1.get_text(strip=True)
+        h1_match = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.IGNORECASE)
+        if h1_match:
+            return h1_match.group(1).strip()
 
         return None
 
@@ -288,7 +356,7 @@ class WebCrawlerTool:
         parsed = urlparse(url)
         return parsed.netloc or parsed.path.split('/')[0]
 
-    def get_relevant_content(self, query: str, top_k: int = 5) -> list:
+    async def get_relevant_content(self, query: str, top_k: int = 5) -> list:
         """Get relevant content chunks for a query using RAG."""
         results = self.vector_store.search(query, top_k)
 
@@ -309,7 +377,7 @@ class WebCrawlerTool:
 web_crawler = WebCrawlerTool()
 
 
-def get_current_web_content(location: str, max_links: Optional[int] = None, max_depth: Optional[int] = None) -> dict:
+async def get_current_web_content(location: str, max_links: Optional[int] = None, max_depth: Optional[int] = None) -> dict:
     """
     Fetch and crawl a URL, returning indexed content for RAG queries.
 
@@ -324,12 +392,12 @@ def get_current_web_content(location: str, max_links: Optional[int] = None, max_
     # Clear previous index for fresh crawl
     web_crawler.vector_store = SimpleVectorStore()
 
-    result = web_crawler.crawl(location, max_links, max_depth)
+    result = await web_crawler.crawl(location, max_links, max_depth)
 
     return result
 
 
-def search_web_content(query: str, top_k: int = 5) -> list:
+async def search_web_content(query: str, top_k: int = 5) -> list:
     """
     Search indexed web content using RAG retrieval.
 
@@ -340,10 +408,10 @@ def search_web_content(query: str, top_k: int = 5) -> list:
     Returns:
         List of relevant content chunks with metadata
     """
-    return web_crawler.get_relevant_content(query, top_k)
+    return await web_crawler.get_relevant_content(query, top_k)
 
 
-def get_web_summary(url: str, query: str) -> str:
+async def get_web_summary(url: str, query: str) -> str:
     """
     Get a summary answering a query about a specific web page.
 
@@ -357,8 +425,8 @@ def get_web_summary(url: str, query: str) -> str:
     # Clear and re-index
     web_crawler.vector_store = SimpleVectorStore()
 
-    # Crawl single page
-    text = web_crawler.fetch_url(url)
+    # Fetch content
+    text = await web_crawler.fetch_url(url)
     if not text:
         return f"Could not fetch content from {url}"
 
@@ -367,7 +435,7 @@ def get_web_summary(url: str, query: str) -> str:
     web_crawler.vector_store.index_document(url, text, chunks)
 
     # Search and summarize
-    results = web_crawler.get_relevant_content(query, top_k=3)
+    results = await web_crawler.get_relevant_content(query, top_k=3)
 
     if not results:
         return f"No relevant content found for '{query}' in {url}"

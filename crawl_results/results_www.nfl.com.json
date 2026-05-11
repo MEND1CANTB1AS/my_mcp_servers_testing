@@ -1,0 +1,31 @@
+{
+  "url": "https://www.nfl.com/",
+  "title": "NFL.com | Official Site of the National Football League",
+  "status_code": 200,
+  "success": true,
+  "final_url": "https://www.nfl.com/",
+  "html_size": 3193860,
+  "markdown_size": 148037,
+  "extracted_content_size": 0,
+  "metadata": {
+    "title": "NFL.com | Official Site of the National Football League",
+    "description": "The official source for NFL news, video highlights, game-day coverage, schedules, stats, scores and more.",
+    "keywords": "NFL, NFL.com",
+    "author": null,
+    "og:title": "NFL.com | Official Site of the National Football League",
+    "og:description": "The official source for NFL news, video highlights, fantasy football, game-day coverage, schedules, stats, scores and more.",
+    "og:url": "https://www.nfl.com/",
+    "og:site_name": "NFL.com",
+    "og:image": "https://static.www.nfl.com/image/upload/v1554321393/league/nvfr7ogywskqrfaiu38m.png",
+    "og:type": "website",
+    "twitter:card": "summary_large_image",
+    "twitter:site": "@NFL",
+    "twitter:title": "NFL.com | Official Site of the National Football League",
+    "twitter:description": "The official source for NFL news, video highlights, fantasy football, game-day coverage, schedules, stats, scores and more.",
+    "twitter:image": "https://static.www.nfl.com/image/upload/v1554321393/league/nvfr7ogywskqrfaiu38m.png"
+  },
+  "links_count": 2,
+  "tables_count": 0,
+  "screenshots": [],
+  "error": ""
+}
