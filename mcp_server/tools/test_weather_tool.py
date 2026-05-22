@@ -6,6 +6,8 @@ from unittest.mock import patch, MagicMock
 import pytest
 import tomllib
 
+import requests
+
 from weather_tool import get_weather
 
 

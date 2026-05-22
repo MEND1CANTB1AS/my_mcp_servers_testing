@@ -11,7 +11,6 @@ from typing import Optional
 from urllib.parse import urljoin, urlparse
 
 from crawl4ai import AsyncWebCrawler
-from crawl4ai.markdown_handler import MarkdownGenerator
 
 
 class SimpleVectorStore:
